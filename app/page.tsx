@@ -168,6 +168,7 @@ function recomputeItem(it: TangibleItem): TangibleItem {
 
 export default function Home() {
   const [files, setFiles] = useState<UploadFile[]>([]);
+  const [parsedDocs, setParsedDocs] = useState<ParsedDoc[] | null>(null);
   const [companies, setCompanies] = useState<CompanyView[] | null>(null);
   const [activeTab, setActiveTab] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -232,13 +233,22 @@ export default function Home() {
     setErrors(errs);
     setRecaptureDismissed(false);
     if (docs.length) {
-      const built = buildCompanies(docs);
-      setCompanies(built);
+      setParsedDocs(docs);
+      setCompanies(buildCompanies(docs));
       setActiveTab(0);
     } else {
+      setParsedDocs(null);
       setCompanies(null);
     }
     setLoading(false);
+  }
+
+  // 초기화: 다시 분석하지 않고, 파싱 직후 상태로 되돌림(셀 수정·할인 선택 모두 리셋)
+  function resetCalc() {
+    if (!parsedDocs) return;
+    setCompanies(buildCompanies(parsedDocs));
+    setActiveTab(0);
+    setRecaptureDismissed(false);
   }
 
   function updateCost(
@@ -306,14 +316,20 @@ export default function Home() {
     });
   }
 
-  function updateDiscount(ci: number, ii: number, pct: number | null) {
+  function updateDiscount(
+    ci: number,
+    ii: number,
+    period: "cur" | "pri",
+    pct: number | null
+  ) {
     setCompanies((prev) => {
       if (!prev) return prev;
       const cs = prev.slice();
       const c = { ...cs[ci] };
       if (!c.tangible) return prev;
       const items = c.tangible.items.slice();
-      items[ii] = { ...items[ii], discountPct: pct };
+      const key = period === "cur" ? "discountPctCur" : "discountPctPri";
+      items[ii] = { ...items[ii], [key]: pct };
       const totals = computeTangibleTotals(items, c.tangible.totals.printed);
       c.tangible = { items, totals };
       cs[ci] = c;
@@ -373,13 +389,25 @@ export default function Home() {
         )}
       </div>
 
-      <button
-        onClick={analyze}
-        disabled={files.length === 0 || loading}
-        className="mt-2 w-full h-10 rounded-md bg-blue-600 text-white font-semibold text-sm disabled:bg-gray-300 active:bg-blue-700"
-      >
-        {loading ? `분석 중… (${files.length}장)` : `분석 (${files.length}장)`}
-      </button>
+      <div className="mt-2 flex gap-2">
+        <button
+          onClick={analyze}
+          disabled={files.length === 0 || loading}
+          className="flex-1 h-10 rounded-md bg-blue-600 text-white font-semibold text-sm disabled:bg-gray-300 active:bg-blue-700"
+        >
+          {loading ? `분석 중… (${files.length}장)` : `분석 (${files.length}장)`}
+        </button>
+        {companies && (
+          <button
+            onClick={resetCalc}
+            disabled={loading}
+            className="h-10 px-3 rounded-md border border-gray-300 bg-white text-gray-600 font-semibold text-sm active:bg-gray-50"
+            title="수정·할인 선택을 처음 분석 상태로 되돌립니다 (재분석 아님)"
+          >
+            ↺ 초기화
+          </button>
+        )}
+      </div>
 
       {errors.length > 0 && (
         <div className="mt-2 rounded-md bg-red-50 border border-red-200 text-red-700 text-[11px] px-2 py-2 space-y-0.5">
@@ -418,7 +446,9 @@ export default function Home() {
           onTangible={(ii, field, sub, v) =>
             updateTangible(activeTab, ii, field, sub, v)
           }
-          onDiscount={(ii, pct) => updateDiscount(activeTab, ii, pct)}
+          onDiscount={(ii, period, pct) =>
+            updateDiscount(activeTab, ii, period, pct)
+          }
           dismissed={recaptureDismissed}
           onDismiss={() => setRecaptureDismissed(true)}
         />
@@ -453,7 +483,7 @@ function CompanyBlock({
     sub: "cur" | "pri",
     v: number | null
   ) => void;
-  onDiscount: (ii: number, pct: number | null) => void;
+  onDiscount: (ii: number, period: "cur" | "pri", pct: number | null) => void;
   dismissed: boolean;
   onDismiss: () => void;
 }) {
@@ -695,6 +725,56 @@ function ExtraRow({
   );
 }
 
+// 할인율 한 줄(당기 또는 전기): [라벨][할인율 select][적용가]
+function DiscountRow({
+  label,
+  pct,
+  applied,
+  onChange,
+  strong,
+}: {
+  label: string;
+  pct: number | null;
+  applied: number | null;
+  onChange: (pct: number | null) => void;
+  strong?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center gap-1 shrink-0">
+        <span className="text-[10px] font-semibold text-indigo-500 w-5">
+          {label}
+        </span>
+        <span className="text-[10px] text-gray-500">할인율</span>
+        <select
+          value={pct ?? ""}
+          onChange={(e) =>
+            onChange(e.target.value === "" ? null : Number(e.target.value))
+          }
+          className="text-[11px] border border-indigo-200 rounded px-1 py-0.5 bg-white"
+        >
+          {DISCOUNT_OPTIONS.map((o) => (
+            <option key={o ?? "none"} value={o ?? ""}>
+              {o == null ? "없음" : `${o}%`}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-baseline gap-1 shrink-0">
+        <span className="text-[10px] text-gray-500">적용가</span>
+        <Amt
+          v={applied}
+          className={
+            strong
+              ? "text-[15px] font-bold text-indigo-700"
+              : "text-[14px] font-bold text-indigo-500"
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
 // ───────────────────── 유형자산 표 ─────────────────────
 
 function TangibleTable({
@@ -709,7 +789,7 @@ function TangibleTable({
     sub: "cur" | "pri",
     v: number | null
   ) => void;
-  onDiscount: (ii: number, pct: number | null) => void;
+  onDiscount: (ii: number, period: "cur" | "pri", pct: number | null) => void;
 }) {
   const notes = useMemo(
     () =>
@@ -749,44 +829,21 @@ function TangibleTable({
               <span>전 <Amt v={it.net.pri} /></span>
             </div>
 
-            {/* 할인율 토글 + 적용가(당기/전기 = 순액 × 할인율%) */}
-            <div className="mt-1 flex items-center justify-between gap-2 bg-indigo-50 rounded px-1.5 py-1">
-              <div className="flex items-center gap-1 shrink-0">
-                <span className="text-[10px] text-gray-500">할인율</span>
-                <select
-                  value={it.discountPct ?? ""}
-                  onChange={(e) =>
-                    onDiscount(
-                      i,
-                      e.target.value === "" ? null : Number(e.target.value)
-                    )
-                  }
-                  className="text-[11px] border border-indigo-200 rounded px-1 py-0.5 bg-white"
-                >
-                  {DISCOUNT_OPTIONS.map((o) => (
-                    <option key={o ?? "none"} value={o ?? ""}>
-                      {o == null ? "없음" : `${o}%`}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-baseline gap-2 shrink-0">
-                <span className="text-[10px] text-gray-500">적용가</span>
-                <span className="flex items-baseline gap-0.5">
-                  <span className="text-[9px] text-indigo-400">당</span>
-                  <Amt
-                    v={appliedValue(it, "cur")}
-                    className="text-[15px] font-bold text-indigo-700"
-                  />
-                </span>
-                <span className="flex items-baseline gap-0.5">
-                  <span className="text-[9px] text-indigo-400">전</span>
-                  <Amt
-                    v={appliedValue(it, "pri")}
-                    className="text-[13px] font-bold text-indigo-500"
-                  />
-                </span>
-              </div>
+            {/* 할인율(당기/전기 각각) + 적용가 = 순액 × 할인율% */}
+            <div className="mt-1 bg-indigo-50 rounded px-1.5 py-1 space-y-1">
+              <DiscountRow
+                label="당기"
+                pct={it.discountPctCur}
+                applied={appliedValue(it, "cur")}
+                onChange={(p) => onDiscount(i, "cur", p)}
+                strong
+              />
+              <DiscountRow
+                label="전기"
+                pct={it.discountPctPri}
+                applied={appliedValue(it, "pri")}
+                onChange={(p) => onDiscount(i, "pri", p)}
+              />
             </div>
 
             {/* 취득원가 줄 */}

@@ -261,7 +261,9 @@ export interface TangibleItem {
   no_dep: boolean;
   status: ItemStatus;
   note: string;
-  discountPct: number | null; // 할인율(%) 10~90, null=없음(100% 인정)
+  // 할인율(%) 10~90, null=없음(100% 인정) — 당기/전기 각각 별도 적용
+  discountPctCur: number | null;
+  discountPctPri: number | null;
 }
 
 export interface TangibleTotals {
@@ -296,7 +298,7 @@ export function appliedValue(
 ): number | null {
   const v = it.net[k];
   if (v == null) return null;
-  const pct = it.discountPct ?? 100;
+  const pct = (k === "cur" ? it.discountPctCur : it.discountPctPri) ?? 100;
   return Math.round(v * (pct / 100));
 }
 
@@ -332,7 +334,8 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
       no_dep: true,
       status: r.status,
       note: r.note,
-      discountPct: null,
+      discountPctCur: null,
+      discountPctPri: null,
     };
   }
   const acc_dep = {
@@ -351,7 +354,8 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
     no_dep: false,
     status: r.status,
     note: r.note,
-    discountPct: null,
+    discountPctCur: null,
+    discountPctPri: null,
   };
 }
 
