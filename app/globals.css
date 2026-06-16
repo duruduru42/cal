@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #f3f4f6;
+  color: #111827;
+  -webkit-text-size-adjust: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+/* 셀 편집 input — 기본 number 스피너 제거, 폭 압축 */
+input.cell-edit {
+  -moz-appearance: textfield;
+}
+input.cell-edit::-webkit-outer-spin-button,
+input.cell-edit::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
