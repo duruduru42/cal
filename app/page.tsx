@@ -168,7 +168,6 @@ function recomputeItem(it: TangibleItem): TangibleItem {
 
 export default function Home() {
   const [files, setFiles] = useState<UploadFile[]>([]);
-  const [parsedDocs, setParsedDocs] = useState<ParsedDoc[] | null>(null);
   const [companies, setCompanies] = useState<CompanyView[] | null>(null);
   const [activeTab, setActiveTab] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -233,22 +232,21 @@ export default function Home() {
     setErrors(errs);
     setRecaptureDismissed(false);
     if (docs.length) {
-      setParsedDocs(docs);
       setCompanies(buildCompanies(docs));
       setActiveTab(0);
     } else {
-      setParsedDocs(null);
       setCompanies(null);
     }
     setLoading(false);
   }
 
-  // 초기화: 다시 분석하지 않고, 파싱 직후 상태로 되돌림(셀 수정·할인 선택 모두 리셋)
-  function resetCalc() {
-    if (!parsedDocs) return;
-    setCompanies(buildCompanies(parsedDocs));
-    setActiveTab(0);
+  // 새로고침: 사진·결과를 전부 비워 처음 상태로(사진 일일이 ✕ 안 눌러도 됨)
+  function refreshAll() {
+    setFiles([]);
+    setCompanies(null);
+    setErrors([]);
     setRecaptureDismissed(false);
+    setActiveTab(0);
   }
 
   function updateCost(
@@ -397,14 +395,14 @@ export default function Home() {
         >
           {loading ? `분석 중… (${files.length}장)` : `분석 (${files.length}장)`}
         </button>
-        {companies && (
+        {(files.length > 0 || companies) && (
           <button
-            onClick={resetCalc}
+            onClick={refreshAll}
             disabled={loading}
             className="h-10 px-3 rounded-md border border-gray-300 bg-white text-gray-600 font-semibold text-sm active:bg-gray-50"
-            title="수정·할인 선택을 처음 분석 상태로 되돌립니다 (재분석 아님)"
+            title="사진과 결과를 모두 비웁니다 (사진 일일이 ✕ 안 눌러도 됨)"
           >
-            ↺ 초기화
+            ↻ 새로고침
           </button>
         )}
       </div>
