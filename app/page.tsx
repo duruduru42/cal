@@ -2,11 +2,14 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
+  appliedValue,
   buildCompanies,
   computeTangibleTotals,
   computeTotal,
   diff,
+  DISCOUNT_OPTIONS,
   DOC_LABEL,
+  toMillion,
   type CompanyView,
   type ItemStatus,
   type ParsedDoc,
@@ -277,6 +280,21 @@ export default function Home() {
     });
   }
 
+  function updateDiscount(ci: number, ii: number, pct: number | null) {
+    setCompanies((prev) => {
+      if (!prev) return prev;
+      const cs = prev.slice();
+      const c = { ...cs[ci] };
+      if (!c.tangible) return prev;
+      const items = c.tangible.items.slice();
+      items[ii] = { ...items[ii], discountPct: pct };
+      const totals = computeTangibleTotals(items, c.tangible.totals.printed);
+      c.tangible = { items, totals };
+      cs[ci] = c;
+      return cs;
+    });
+  }
+
   const active = companies && companies[activeTab];
 
   return (
@@ -369,6 +387,7 @@ export default function Home() {
           onTangible={(ii, field, sub, v) =>
             updateTangible(activeTab, ii, field, sub, v)
           }
+          onDiscount={(ii, pct) => updateDiscount(activeTab, ii, pct)}
         />
       )}
 
@@ -387,6 +406,7 @@ function CompanyBlock({
   onCost,
   onExtra,
   onTangible,
+  onDiscount,
 }: {
   company: CompanyView;
   single: boolean;
@@ -398,6 +418,7 @@ function CompanyBlock({
     sub: "cur" | "pri",
     v: number | null
   ) => void;
+  onDiscount: (ii: number, pct: number | null) => void;
 }) {
   return (
     <div className="mt-3">
@@ -434,6 +455,7 @@ function CompanyBlock({
           <TangibleTable
             tangible={company.tangible}
             onTangible={onTangible}
+            onDiscount={onDiscount}
           />
         </Section>
       )}
@@ -588,6 +610,7 @@ function ExtraRow({
 function TangibleTable({
   tangible,
   onTangible,
+  onDiscount,
 }: {
   tangible: NonNullable<CompanyView["tangible"]>;
   onTangible: (
@@ -596,6 +619,7 @@ function TangibleTable({
     sub: "cur" | "pri",
     v: number | null
   ) => void;
+  onDiscount: (ii: number, pct: number | null) => void;
 }) {
   const notes = useMemo(
     () =>
@@ -633,6 +657,35 @@ function TangibleTable({
               <span className="text-[10px] text-gray-400">순액</span>
               <span>당 {fmt(it.net.cur)}</span>
               <span>전 {fmt(it.net.pri)}</span>
+            </div>
+
+            {/* 할인율 토글 + 적용가(당기 순액 × 할인율%) */}
+            <div className="mt-1 flex items-center justify-between gap-2 bg-indigo-50 rounded px-1.5 py-1">
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-500">할인율</span>
+                <select
+                  value={it.discountPct ?? ""}
+                  onChange={(e) =>
+                    onDiscount(
+                      i,
+                      e.target.value === "" ? null : Number(e.target.value)
+                    )
+                  }
+                  className="text-[11px] border border-indigo-200 rounded px-1 py-0.5 bg-white"
+                >
+                  {DISCOUNT_OPTIONS.map((o) => (
+                    <option key={o ?? "none"} value={o ?? ""}>
+                      {o == null ? "없음" : `${o}%`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-baseline gap-1 shrink-0">
+                <span className="text-[10px] text-gray-500">적용가</span>
+                <span className="text-[15px] font-bold tabular-nums text-indigo-700">
+                  {fmt(appliedValue(it))}
+                </span>
+              </div>
             </div>
 
             {/* 취득원가 줄 */}
@@ -699,8 +752,46 @@ function TangibleTable({
         )}
       </div>
 
+      {/* 그룹 소계 (당기 순액) — 백만원 단위 정수 + 원 병기 */}
+      <SubtotalRow
+        label="기계장치 · 시설장치 · 금형 순액"
+        won={tangible.totals.subtotalMachine}
+      />
+      <SubtotalRow
+        label="공구와기구 · 비품 순액"
+        won={tangible.totals.subtotalTools}
+      />
+
+      {/* 할인 적용가 합계 (당기) — 주인공 */}
+      <div className="mt-2 rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-2 flex items-center justify-between">
+        <span className="text-xs font-bold text-indigo-900">
+          할인 적용가 합계 <span className="text-[10px] text-indigo-500">(당기)</span>
+        </span>
+        <span className="text-[17px] font-bold tabular-nums text-indigo-700">
+          {fmt(tangible.totals.applied)}
+        </span>
+      </div>
+
       {notes.length > 0 && <NotesArea notes={notes} />}
     </>
+  );
+}
+
+// 그룹 순액 소계 한 줄: 백만원 단위 정수 강조 + 원 값 병기
+function SubtotalRow({ label, won }: { label: string; won: number | null }) {
+  return (
+    <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 flex items-center justify-between gap-2">
+      <div className="min-w-0">
+        <div className="text-xs font-bold text-emerald-900">{label}</div>
+        <div className="text-[10px] text-emerald-600">{fmt(won)} 원</div>
+      </div>
+      <div className="flex items-baseline gap-1 shrink-0">
+        <span className="text-[18px] font-bold tabular-nums text-emerald-700">
+          {fmt(toMillion(won))}
+        </span>
+        <span className="text-[10px] text-emerald-500">백만원</span>
+      </div>
+    </div>
   );
 }
 

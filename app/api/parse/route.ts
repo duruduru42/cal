@@ -219,8 +219,14 @@ export async function POST(req: Request) {
     const filled = (doc.items ?? [])
       .filter((it) => it.pl != null || it.cogm != null)
       .map((it) => `${it.name}: pl=${it.pl} cogm=${it.cogm}`);
+    // 모델 원본 company_key와 정규화 결과를 함께 출력(코드포인트까지) → 그룹핑 진단용
+    const rawKey =
+      (parsed as any)?.company_key ?? (parsed as any)?.company_raw ?? "";
+    const cps = Array.from(String(doc.company_key))
+      .map((ch) => ch.codePointAt(0)!.toString(16))
+      .join(" ");
     console.log(
-      `[PARSE] doc_type=${doc.doc_type} company_raw="${doc.company_raw}" company_key="${doc.company_key}" unit=${doc.unit} 채워진품목=${filled.length}/16`
+      `[PARSE] doc_type=${doc.doc_type} company_raw="${doc.company_raw}" 모델키="${rawKey}" 정규화키="${doc.company_key}" [cp:${cps}] unit=${doc.unit} 채워진품목=${filled.length}/16`
     );
     if (doc.items) console.log(`[PARSE] items → ${filled.join(" | ") || "(없음)"}`);
     if (doc.extras)

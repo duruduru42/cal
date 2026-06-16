@@ -91,13 +91,21 @@ export function diff(cur: number | null, pri: number | null): number | null {
   return cur - pri;
 }
 
-// 회사명 정규화 → 그룹핑 키 (모델값을 신뢰하지 않고 클라이언트에서 한 번 더)
+// 회사명 정규화 → 그룹핑 키 (모델값을 신뢰하지 않고 클라이언트에서 한 번 더).
+// 눈에는 같아 보여도 코드가 다른 표기들을 모두 통일한다:
+//  - NFKC: 조합형/완성형 한글(NFC/NFD), 전각/반각, ㈜→(주) 등을 한 형태로 정규화
+//  - 법인격 표기((주)·㈜·주식회사 등)는 키에서 제거(표시는 원문 company_raw 사용)
+//  - 코드 prefix, 공백, 괄호·점·가운뎃점 등 부수 문자 제거
 export function normalizeCompanyKey(raw: string | null | undefined): string {
   if (!raw) return "";
-  let s = String(raw);
+  let s = String(raw).normalize("NFKC");
+  s = s.replace(/회\s*사\s*(명|상호)?\s*[:：]/g, ""); // "회사명:" 라벨 제거
   s = s.replace(/\s+/g, ""); // 공백 전부 제거(자간 벌어짐 대응)
-  s = s.replace(/^\d+[.\-]/, ""); // 앞쪽 코드 prefix( 1000. ) 제거
-  s = s.replace(/[.··ㆍﾷ]/g, ""); // 가운뎃점·마침표 제거
+  s = s.replace(/^\d+[.\-_]/, ""); // 앞쪽 코드 prefix( 1000. ) 제거
+  s = s.replace(/주식회사|유한회사|유한책임회사|합자회사|합명회사/g, ""); // 법인격(문어)
+  s = s.replace(/\((주|유|재|사|합|자|有|株)\)/g, ""); // 법인격(괄호)
+  // 남은 부수 문자 제거 — 한글(완성형+호환자모)/영문/숫자만 남긴다
+  s = s.replace(/[^0-9A-Za-z가-힣㄰-㆏]/g, "");
   return s;
 }
 
@@ -239,12 +247,44 @@ export interface TangibleItem {
   no_dep: boolean;
   status: ItemStatus;
   note: string;
+  discountPct: number | null; // 할인율(%) 10~90, null=없음(100% 인정)
 }
 
 export interface TangibleTotals {
   net: { cur: number | null; pri: number | null };
   printed: { cur: number | null; pri: number | null };
   integrity: { cur: boolean; pri: boolean };
+  applied: number | null; // 적용가 합계(당기) = Σ 순액당기 × 할인율%
+  // 항목 그룹별 순액(당기) 소계 — 원 단위. 화면에서 백만원 단위로 반올림 표시.
+  subtotalMachine: number | null; // 기계장치 + 시설장치 + 금형
+  subtotalTools: number | null; // 공구와기구 + 비품
+}
+
+// 원 → 백만원 단위 정수(반올림). 100만원 미만은 반올림.
+export function toMillion(v: number | null): number | null {
+  if (v == null) return null;
+  return Math.round(v / 1_000_000);
+}
+
+// 선택 가능한 할인율(%) — 없음(null) + 10~90
+export const DISCOUNT_OPTIONS: (number | null)[] = [
+  null,
+  10,
+  20,
+  30,
+  40,
+  50,
+  60,
+  70,
+  80,
+  90,
+];
+
+// 적용가(당기) = 순액당기 × (할인율%/100). 없음(null)이면 순액 그대로(100% 인정).
+export function appliedValue(it: TangibleItem): number | null {
+  if (it.net.cur == null) return null;
+  const pct = it.discountPct ?? 100;
+  return Math.round(it.net.cur * (pct / 100));
 }
 
 export interface TangibleView {
@@ -277,6 +317,7 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
       no_dep: true,
       status: r.status,
       note: r.note,
+      discountPct: null,
     };
   }
   const acc_dep = {
@@ -295,6 +336,7 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
     no_dep: false,
     status: r.status,
     note: r.note,
+    discountPct: null,
   };
 }
 
@@ -321,6 +363,29 @@ export function computeTangibleTotals(
     return any ? acc : null;
   };
   const net = { cur: sum("cur"), pri: sum("pri") };
+
+  // 적용가 합계(당기): 각 항목의 할인 적용가를 더함(없음=100% 인정)
+  let applied: number | null = null;
+  for (const it of items) {
+    const v = appliedValue(it);
+    if (v != null) applied = (applied ?? 0) + v;
+  }
+
+  // 항목 그룹별 순액(당기) 소계 — 이름으로 매칭
+  const sumNetCur = (pred: (name: string) => boolean): number | null => {
+    let acc = 0;
+    let any = false;
+    for (const it of items) {
+      if (pred(it.name) && it.net.cur != null) {
+        acc += it.net.cur;
+        any = true;
+      }
+    }
+    return any ? acc : null;
+  };
+  const subtotalMachine = sumNetCur((n) => /기계|시설|금형/.test(n));
+  const subtotalTools = sumNetCur((n) => /공구|비품/.test(n));
+
   return {
     net,
     printed,
@@ -328,6 +393,9 @@ export function computeTangibleTotals(
       cur: printed.cur != null && net.cur === printed.cur,
       pri: printed.pri != null && net.pri === printed.pri,
     },
+    applied,
+    subtotalMachine,
+    subtotalTools,
   };
 }
 
@@ -390,64 +458,64 @@ function mergeCost(
   return { items, extras };
 }
 
-// 파싱 결과 배열 → 회사별 뷰 (산수 포함)
+// 파싱 결과 배열 → 단일 뷰 (회사 그룹핑 없음).
+// 사용자는 "한 번에 같은 회사 문서만" 올린다는 전제. 올린 문서를 전부 하나로 병합.
+// 단, 회사명이 둘 이상으로 감지되면 표시용 이름에 병기해 섞임을 알 수 있게 한다.
 export function buildCompanies(docs: ParsedDoc[]): CompanyView[] {
-  const groups = new Map<string, ParsedDoc[]>();
-  for (const d of docs) {
-    const key = d.company_key || "(미분류)";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(d);
+  if (!docs.length) return [];
+
+  // 같은 문서종류가 여러 장(분할 촬영)이면 전부 모아 병합한다.
+  const incomeDocs = docs.filter((d) => d.doc_type === "income_statement");
+  const mfgDocs = docs.filter((d) => d.doc_type === "manufacturing_cost");
+  const bsDocs = docs.filter(
+    (d) => d.doc_type === "balance_sheet" && d.tangible_assets
+  );
+
+  const documents = docs
+    .map((d) => d.doc_type)
+    .filter((t, i, a) => a.indexOf(t) === i);
+
+  const cost =
+    incomeDocs.length || mfgDocs.length ? mergeCost(incomeDocs, mfgDocs) : null;
+
+  let tangible: TangibleView | null = null;
+  if (bsDocs.length) {
+    const items = bsDocs
+      .flatMap((d) => d.tangible_assets ?? [])
+      .map(computeTangibleItem);
+    const printed = bsDocs
+      .map((d) => d.printed_total)
+      .find((p) => p && (p.cur != null || p.pri != null)) ?? {
+      cur: null,
+      pri: null,
+    };
+    tangible = { items, totals: computeTangibleTotals(items, printed) };
   }
 
-  const out: CompanyView[] = [];
-  for (const [key, list] of groups) {
-    // 같은 문서종류가 여러 장(분할 촬영)이면 전부 모아 병합한다.
-    const incomeDocs = list.filter((d) => d.doc_type === "income_statement");
-    const mfgDocs = list.filter((d) => d.doc_type === "manufacturing_cost");
-    const bsDocs = list.filter(
-      (d) => d.doc_type === "balance_sheet" && d.tangible_assets
-    );
+  // 표시용 회사명: 정규화 키 기준 distinct. 2개 이상이면 병기(섞임 경고용).
+  const seen = new Map<string, string>();
+  for (const d of docs) {
+    const k = d.company_key || normalizeCompanyKey(d.company_raw);
+    if (k && !seen.has(k)) seen.set(k, d.company_raw || k);
+  }
+  const names = [...seen.values()];
+  const raw =
+    names.length > 1 ? names.join("  /  ") : names[0] || "분석 결과";
 
-    const documents = list
-      .map((d) => d.doc_type)
-      .filter((t, i, a) => a.indexOf(t) === i);
+  const fiscal =
+    docs.find((d) => d.fiscal?.current || d.fiscal?.prior)?.fiscal || {
+      current: null,
+      prior: null,
+    };
 
-    const cost =
-      incomeDocs.length || mfgDocs.length
-        ? mergeCost(incomeDocs, mfgDocs)
-        : null;
-
-    let tangible: TangibleView | null = null;
-    // 재무상태표도 여러 장이면 자산 줄을 합치고, printed_total은 첫 non-null 채택.
-    if (bsDocs.length) {
-      const items = bsDocs
-        .flatMap((d) => d.tangible_assets ?? [])
-        .map(computeTangibleItem);
-      const printed = bsDocs
-        .map((d) => d.printed_total)
-        .find((p) => p && (p.cur != null || p.pri != null)) ?? {
-        cur: null,
-        pri: null,
-      };
-      tangible = { items, totals: computeTangibleTotals(items, printed) };
-    }
-
-    const raw =
-      list.find((d) => d.company_raw)?.company_raw || key;
-    const fiscal =
-      list.find((d) => d.fiscal?.current || d.fiscal?.prior)?.fiscal || {
-        current: null,
-        prior: null,
-      };
-
-    out.push({
-      company_key: key,
+  return [
+    {
+      company_key: "all",
       company_raw: raw,
       documents,
       cost,
       tangible,
       fiscal,
-    });
-  }
-  return out;
+    },
+  ];
 }
