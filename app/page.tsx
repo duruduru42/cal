@@ -33,13 +33,46 @@ function signed(n: number | null): { text: string; cls: string } {
     : { text: s.replace("-", "−"), cls: "text-red-600" };
 }
 
-function fileToDataUrl(file: File): Promise<string> {
+function readAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(r.result as string);
     r.onerror = reject;
     r.readAsDataURL(file);
   });
+}
+
+// 업로드 전 이미지 축소 (긴 변 maxDim, JPEG 재인코딩).
+// Anthropic Vision이 어차피 ~1568px로 다운스케일하므로 화질 손해 없이
+// 요청 본문 크기를 크게 줄여 413(Request Entity Too Large)을 방지한다.
+function downscale(dataUrl: string, maxDim = 1568, quality = 0.82): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const longest = Math.max(img.width, img.height);
+      const scale = longest > maxDim ? maxDim / longest : 1;
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return resolve(dataUrl);
+      ctx.drawImage(img, 0, 0, w, h);
+      try {
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch {
+        resolve(dataUrl); // 변환 실패 시 원본
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  const raw = await readAsDataUrl(file);
+  return downscale(raw);
 }
 
 interface UploadFile {
@@ -143,9 +176,21 @@ export default function Home() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ image: f.dataUrl }),
           });
-          const data = await res.json();
-          if (!res.ok) {
-            errs.push(`${f.name}: ${data?.error || "분석 실패"}`);
+          // 비-JSON 응답(413/HTML 등)도 깨끗한 메시지로 처리
+          const text = await res.text();
+          let data: any = null;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = null;
+          }
+          if (!res.ok || !data) {
+            const msg = data?.error
+              ? data.error
+              : res.status === 413
+              ? "이미지 용량이 너무 큽니다 (축소 후에도 초과)."
+              : `서버 오류 (HTTP ${res.status})`;
+            errs.push(`${f.name}: ${msg}`);
             return null;
           }
           return data as ParsedDoc;
