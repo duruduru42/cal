@@ -21,7 +21,8 @@ const SYSTEM_PROMPT = `당신은 한국 재무제표 파싱 전문 AI다. 이미
   "엠.제이.테크(주)" → "엠제이테크(주)".
 - fiscal: { current: "제N기", prior: "제N-1기" } (없으면 null).
 - 단위 머리말(원/천원/백만원) 식별해 unit 에 기입. 콤마 제거. (), △ 는 음수.
-- 산수 금지: total/net/delta 등은 계산하지 말 것(클라이언트가 한다).
+- 교차계산 금지: total(=pl+cogm)·net·delta 등 문서를 합치는 계산은 클라이언트가 한다.
+  단, "한 문서 안에서" 명시된 합산(예: 급여총액 = 급여+임금+잡급)은 네가 직접 더해서 값을 채운다.
 
 [balance_sheet 모드] '(2) 유형자산' 블록만 추출.
 - 당기(current)·전기(prior) 두 컬럼 모두 읽는다.
@@ -51,8 +52,15 @@ const SYSTEM_PROMPT = `당신은 한국 재무제표 파싱 전문 AI다. 이미
 원재료비, 연료비, 전력비, 용수비(수도비), 외주가공비(위탁생산비),
 수선비(수리유지비), 급여총액, 퇴직급여, 복리후생비, 임차료, 세금과공과,
 감가상각비, 대손상각비, 경상연구개발비, 광고선전비, 운반·하역·보관비
-- 이 문서가 income_statement 이면 추출값을 각 품목의 "pl" 에 넣고 "cogm"=null.
-  manufacturing_cost 이면 "cogm" 에 넣고 "pl"=null.
+★ 값 기입 규칙 (가장 중요):
+- 문서에서 해당 품목을 찾으면, 읽은 숫자를 반드시 값 필드에 "숫자로" 기입한다.
+  · income_statement → 그 숫자를 "pl" 에 넣는다("cogm"=null).
+  · manufacturing_cost → 그 숫자를 "cogm" 에 넣는다("pl"=null).
+- 값을 note 에만 적고 pl/cogm 을 null 로 두는 것은 금지. 읽은 값은 무조건 pl 또는 cogm 에 넣어라.
+- 손익계산서의 판매비와관리비(판관비) 세부 항목에서 표준 품목을 찾아 pl 에 채운다
+  (예: 급여·잡급→급여총액, 복리후생비, 세금과공과(금), 감가상각비, 광고선전비, 운반비, 임차료,
+   퇴직급여, 경상연구개발비, 대손상각비 등). 판관비 소항목이 보이면 적극적으로 매핑할 것.
+- 당기(current) 값을 기준으로 pl/cogm 에 넣는다(전기 아님).
 - 명칭 매핑/예외:
   · 용수비(수도비) ← '가스수도료'  → status="exception", note="원문 '가스수도료', 가스 포함"
   · 급여총액 ← 급여+임금+잡급 합산  → status="exception", note="급여+임금+잡급 합산"
@@ -70,9 +78,16 @@ const SYSTEM_PROMPT = `당신은 한국 재무제표 파싱 전문 AI다. 이미
 {
   "doc_type":"income_statement","company_raw":"...","company_key":"...",
   "fiscal":{"current":"제29기","prior":"제28기"},"unit":"원",
-  "items":[ {"name":"원재료비","pl":null,"cogm":null,"total":null,"status":"ok","note":""}, ... 16개 ],
+  "items":[
+    {"name":"급여총액","pl":347872711,"cogm":null,"total":null,"status":"exception","note":"급여+잡급 합산"},
+    {"name":"복리후생비","pl":118331900,"cogm":null,"total":null,"status":"ok","note":""},
+    {"name":"세금과공과","pl":15427577,"cogm":null,"total":null,"status":"exception","note":"원문 '세금과공과금'"},
+    {"name":"원재료비","pl":null,"cogm":null,"total":null,"status":"review","note":"문서에 없음"}
+    /* ... 표준 16개 전부. 문서에서 읽은 값은 반드시 pl(또는 cogm)에 숫자로 채울 것 ... */
+  ],
   "extras":{"손익계산서_판관비":734913280,"영업이익":864121367}
 }
+(manufacturing_cost 예시: {"name":"원재료비","pl":null,"cogm":13069065395,"total":null,"status":"ok","note":""})
 
 [출력] 위 형식의 JSON만 출력. 설명·마크다운·코드펜스 절대 금지.`;
 
@@ -197,5 +212,22 @@ export async function POST(req: Request) {
     );
   }
 
-  return NextResponse.json(normalizeDoc(parsed));
+  const doc = normalizeDoc(parsed);
+
+  // ── 임시 디버그 로그 (비용 합산표 디버깅용) ──
+  try {
+    const filled = (doc.items ?? [])
+      .filter((it) => it.pl != null || it.cogm != null)
+      .map((it) => `${it.name}: pl=${it.pl} cogm=${it.cogm}`);
+    console.log(
+      `[PARSE] doc_type=${doc.doc_type} company_raw="${doc.company_raw}" company_key="${doc.company_key}" unit=${doc.unit} 채워진품목=${filled.length}/16`
+    );
+    if (doc.items) console.log(`[PARSE] items → ${filled.join(" | ") || "(없음)"}`);
+    if (doc.extras)
+      console.log(
+        `[PARSE] extras → 판관비=${doc.extras.손익계산서_판관비} 영업이익=${doc.extras.영업이익}`
+      );
+  } catch {}
+
+  return NextResponse.json(doc);
 }

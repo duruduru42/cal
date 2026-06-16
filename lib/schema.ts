@@ -331,22 +331,35 @@ export function computeTangibleTotals(
   };
 }
 
-// 비용 문서(손익+제조원가) 병합 → 16품목 합산표
-function mergeCost(
-  income: ParsedDoc | null,
-  mfg: ParsedDoc | null
-): CostView {
-  const incMap = new Map<string, CostItem>();
-  const mfgMap = new Map<string, CostItem>();
-  income?.items?.forEach((it) => incMap.set(it.name, it));
-  mfg?.items?.forEach((it) => mfgMap.set(it.name, it));
+// 같은 종류 문서가 여러 장(분할 촬영)일 때, 품목별로 첫 non-null 값을 채택.
+// prefer="pl"이면 손익(pl) 쪽 값을, "cogm"이면 제조 쪽 값을 우선.
+function pickAcross(
+  docs: ParsedDoc[],
+  name: string,
+  prefer: "pl" | "cogm"
+): { value: number | null; status: ItemStatus | null; note: string } {
+  let fallback: { status: ItemStatus; note: string } | null = null;
+  for (const d of docs) {
+    const it = d.items?.find((x) => x.name === name);
+    if (!it) continue;
+    const v = prefer === "pl" ? it.pl ?? it.cogm : it.cogm ?? it.pl;
+    if (v != null) return { value: v, status: it.status, note: it.note };
+    if (!fallback) fallback = { status: it.status, note: it.note };
+  }
+  return { value: null, status: fallback?.status ?? null, note: fallback?.note ?? "" };
+}
 
+// 비용 문서(손익 N장 + 제조원가 N장) 병합 → 16품목 합산표
+function mergeCost(
+  incomeDocs: ParsedDoc[],
+  mfgDocs: ParsedDoc[]
+): CostView {
   const items: CostItem[] = STANDARD_ITEMS.map((name) => {
-    const inc = incMap.get(name);
-    const m = mfgMap.get(name);
-    const pl = inc ? inc.pl ?? inc.cogm : null;
-    const cogm = m ? m.cogm ?? m.pl : null;
-    const statuses = [inc?.status, m?.status].filter(Boolean) as ItemStatus[];
+    const inc = pickAcross(incomeDocs, name, "pl");
+    const m = pickAcross(mfgDocs, name, "cogm");
+    const pl = inc.value;
+    const cogm = m.value;
+    const statuses = [inc.status, m.status].filter(Boolean) as ItemStatus[];
     const status: ItemStatus = statuses.includes("exception")
       ? "exception"
       : statuses.includes("review")
@@ -354,15 +367,25 @@ function mergeCost(
       : statuses.length
       ? "ok"
       : "review";
-    const note = [inc?.note, m?.note]
+    const note = [inc.note, m.note]
       .filter((n) => n && n.trim())
       .filter((n, i, a) => a.indexOf(n) === i)
       .join(" / ");
     return { name, pl, cogm, total: computeTotal(pl, cogm), status, note };
   });
 
-  const extras = income?.extras ??
-    mfg?.extras ?? { 손익계산서_판관비: null, 영업이익: null };
+  // extras: 손익 문서들 중 첫 non-null 우선, 없으면 제조 문서
+  const pickExtra = (k: "손익계산서_판관비" | "영업이익") => {
+    for (const d of [...incomeDocs, ...mfgDocs]) {
+      const v = d.extras?.[k];
+      if (v != null) return v;
+    }
+    return null;
+  };
+  const extras = {
+    손익계산서_판관비: pickExtra("손익계산서_판관비"),
+    영업이익: pickExtra("영업이익"),
+  };
 
   return { items, extras };
 }
@@ -378,26 +401,34 @@ export function buildCompanies(docs: ParsedDoc[]): CompanyView[] {
 
   const out: CompanyView[] = [];
   for (const [key, list] of groups) {
-    // 같은 문서종류 중복 → 나중 것 우선(last wins)
-    let income: ParsedDoc | null = null;
-    let mfg: ParsedDoc | null = null;
-    let bs: ParsedDoc | null = null;
-    for (const d of list) {
-      if (d.doc_type === "income_statement") income = d;
-      else if (d.doc_type === "manufacturing_cost") mfg = d;
-      else if (d.doc_type === "balance_sheet") bs = d;
-    }
+    // 같은 문서종류가 여러 장(분할 촬영)이면 전부 모아 병합한다.
+    const incomeDocs = list.filter((d) => d.doc_type === "income_statement");
+    const mfgDocs = list.filter((d) => d.doc_type === "manufacturing_cost");
+    const bsDocs = list.filter(
+      (d) => d.doc_type === "balance_sheet" && d.tangible_assets
+    );
 
     const documents = list
       .map((d) => d.doc_type)
       .filter((t, i, a) => a.indexOf(t) === i);
 
-    const cost = income || mfg ? mergeCost(income, mfg) : null;
+    const cost =
+      incomeDocs.length || mfgDocs.length
+        ? mergeCost(incomeDocs, mfgDocs)
+        : null;
 
     let tangible: TangibleView | null = null;
-    if (bs && bs.tangible_assets) {
-      const items = bs.tangible_assets.map(computeTangibleItem);
-      const printed = bs.printed_total ?? { cur: null, pri: null };
+    // 재무상태표도 여러 장이면 자산 줄을 합치고, printed_total은 첫 non-null 채택.
+    if (bsDocs.length) {
+      const items = bsDocs
+        .flatMap((d) => d.tangible_assets ?? [])
+        .map(computeTangibleItem);
+      const printed = bsDocs
+        .map((d) => d.printed_total)
+        .find((p) => p && (p.cur != null || p.pri != null)) ?? {
+        cur: null,
+        pri: null,
+      };
       tangible = { items, totals: computeTangibleTotals(items, printed) };
     }
 
