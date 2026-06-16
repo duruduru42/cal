@@ -262,8 +262,12 @@ export interface TangibleItem {
   status: ItemStatus;
   note: string;
   // 할인율(%) 10~90, null=없음(100% 인정) — 당기/전기 각각 별도 적용
-  discountPctCur: number | null;
-  discountPctPri: number | null;
+  // 취득원가(cost) 할인
+  costDiscountPctCur: number | null;
+  costDiscountPctPri: number | null;
+  // 감가상각누계액(acc_dep) 할인
+  depDiscountPctCur: number | null;
+  depDiscountPctPri: number | null;
 }
 
 export interface TangibleTotals {
@@ -290,16 +294,39 @@ export const DISCOUNT_OPTIONS: (number | null)[] = [
   90,
 ];
 
-// 적용가 = 순액 × (할인율%/100). 없음(null)이면 순액 그대로(100% 인정).
-// k="cur"(당기, 기본) | "pri"(전기).
+// 취득원가 적용가 = 취득원가 × (취득할인율%/100).
+export function appliedCost(
+  it: TangibleItem,
+  k: "cur" | "pri" = "cur"
+): number | null {
+  const v = it.cost[k];
+  if (v == null) return null;
+  const pct = (k === "cur" ? it.costDiscountPctCur : it.costDiscountPctPri) ?? 100;
+  return Math.round(v * (pct / 100));
+}
+
+// 감가상각누계액 적용가 = 누계액 × (감가할인율%/100). 누계 없으면 null.
+export function appliedDep(
+  it: TangibleItem,
+  k: "cur" | "pri" = "cur"
+): number | null {
+  if (!it.acc_dep) return null;
+  const v = it.acc_dep[k];
+  if (v == null) return null;
+  const pct = (k === "cur" ? it.depDiscountPctCur : it.depDiscountPctPri) ?? 100;
+  return Math.round(v * (pct / 100));
+}
+
+// 순액 적용가 = 할인 적용된 취득원가 + 할인 적용된 감가상각누계액.
+// (순액 자체엔 할인을 걸지 않음. no_dep이면 = 취득 적용가)
 export function appliedValue(
   it: TangibleItem,
   k: "cur" | "pri" = "cur"
 ): number | null {
-  const v = it.net[k];
-  if (v == null) return null;
-  const pct = (k === "cur" ? it.discountPctCur : it.discountPctPri) ?? 100;
-  return Math.round(v * (pct / 100));
+  const c = appliedCost(it, k);
+  const d = appliedDep(it, k);
+  if (c == null && d == null) return null;
+  return (c ?? 0) + (d ?? 0);
 }
 
 export interface TangibleView {
@@ -334,8 +361,10 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
       no_dep: true,
       status: r.status,
       note: r.note,
-      discountPctCur: null,
-      discountPctPri: null,
+      costDiscountPctCur: null,
+      costDiscountPctPri: null,
+      depDiscountPctCur: null,
+      depDiscountPctPri: null,
     };
   }
   const acc_dep = {
@@ -354,8 +383,10 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
     no_dep: false,
     status: r.status,
     note: r.note,
-    discountPctCur: null,
-    discountPctPri: null,
+    costDiscountPctCur: null,
+    costDiscountPctPri: null,
+    depDiscountPctCur: null,
+    depDiscountPctPri: null,
   };
 }
 

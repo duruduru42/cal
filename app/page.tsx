@@ -2,6 +2,8 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
+  appliedCost,
+  appliedDep,
   appliedValue,
   buildCompanies,
   computeTangibleTotals,
@@ -317,6 +319,7 @@ export default function Home() {
   function updateDiscount(
     ci: number,
     ii: number,
+    target: "cost" | "dep",
     period: "cur" | "pri",
     pct: number | null
   ) {
@@ -326,7 +329,14 @@ export default function Home() {
       const c = { ...cs[ci] };
       if (!c.tangible) return prev;
       const items = c.tangible.items.slice();
-      const key = period === "cur" ? "discountPctCur" : "discountPctPri";
+      const key =
+        target === "cost"
+          ? period === "cur"
+            ? "costDiscountPctCur"
+            : "costDiscountPctPri"
+          : period === "cur"
+          ? "depDiscountPctCur"
+          : "depDiscountPctPri";
       items[ii] = { ...items[ii], [key]: pct };
       const totals = computeTangibleTotals(items, c.tangible.totals.printed);
       c.tangible = { items, totals };
@@ -444,8 +454,8 @@ export default function Home() {
           onTangible={(ii, field, sub, v) =>
             updateTangible(activeTab, ii, field, sub, v)
           }
-          onDiscount={(ii, period, pct) =>
-            updateDiscount(activeTab, ii, period, pct)
+          onDiscount={(ii, target, period, pct) =>
+            updateDiscount(activeTab, ii, target, period, pct)
           }
           dismissed={recaptureDismissed}
           onDismiss={() => setRecaptureDismissed(true)}
@@ -481,7 +491,12 @@ function CompanyBlock({
     sub: "cur" | "pri",
     v: number | null
   ) => void;
-  onDiscount: (ii: number, period: "cur" | "pri", pct: number | null) => void;
+  onDiscount: (
+    ii: number,
+    target: "cost" | "dep",
+    period: "cur" | "pri",
+    pct: number | null
+  ) => void;
   dismissed: boolean;
   onDismiss: () => void;
 }) {
@@ -730,17 +745,23 @@ function DiscountRow({
   applied,
   onChange,
   strong,
+  tone = "indigo",
 }: {
   label: string;
   pct: number | null;
   applied: number | null;
   onChange: (pct: number | null) => void;
   strong?: boolean;
+  tone?: "indigo" | "rose";
 }) {
+  const labelCls = tone === "rose" ? "text-rose-500" : "text-indigo-500";
+  const borderCls = tone === "rose" ? "border-rose-200" : "border-indigo-200";
+  const valStrong = tone === "rose" ? "text-rose-700" : "text-indigo-700";
+  const valSoft = tone === "rose" ? "text-rose-500" : "text-indigo-500";
   return (
     <div className="flex items-center justify-between gap-2">
       <div className="flex items-center gap-1 shrink-0">
-        <span className="text-[10px] font-semibold text-indigo-500 w-5">
+        <span className={`text-[10px] font-semibold w-5 ${labelCls}`}>
           {label}
         </span>
         <span className="text-[10px] text-gray-500">할인율</span>
@@ -749,7 +770,7 @@ function DiscountRow({
           onChange={(e) =>
             onChange(e.target.value === "" ? null : Number(e.target.value))
           }
-          className="text-[11px] border border-indigo-200 rounded px-1 py-0.5 bg-white"
+          className={`text-[11px] border rounded px-1 py-0.5 bg-white ${borderCls}`}
         >
           {DISCOUNT_OPTIONS.map((o) => (
             <option key={o ?? "none"} value={o ?? ""}>
@@ -764,8 +785,8 @@ function DiscountRow({
           v={applied}
           className={
             strong
-              ? "text-[15px] font-bold text-indigo-700"
-              : "text-[14px] font-bold text-indigo-500"
+              ? `text-[15px] font-bold ${valStrong}`
+              : `text-[14px] font-bold ${valSoft}`
           }
         />
       </div>
@@ -787,7 +808,12 @@ function TangibleTable({
     sub: "cur" | "pri",
     v: number | null
   ) => void;
-  onDiscount: (ii: number, period: "cur" | "pri", pct: number | null) => void;
+  onDiscount: (
+    ii: number,
+    target: "cost" | "dep",
+    period: "cur" | "pri",
+    pct: number | null
+  ) => void;
 }) {
   const notes = useMemo(
     () =>
@@ -820,31 +846,7 @@ function TangibleTable({
               <span className="text-xs">{BADGE[it.status]}</span>
             </div>
 
-            {/* 순액 (보조) */}
-            <div className="mt-1 flex items-center gap-3 text-[11px] text-gray-500">
-              <span className="text-[10px] text-gray-400">순액</span>
-              <span>당 <Amt v={it.net.cur} /></span>
-              <span>전 <Amt v={it.net.pri} /></span>
-            </div>
-
-            {/* 할인율(당기/전기 각각) + 적용가 = 순액 × 할인율% */}
-            <div className="mt-1 bg-indigo-50 rounded px-1.5 py-1 space-y-1">
-              <DiscountRow
-                label="당기"
-                pct={it.discountPctCur}
-                applied={appliedValue(it, "cur")}
-                onChange={(p) => onDiscount(i, "cur", p)}
-                strong
-              />
-              <DiscountRow
-                label="전기"
-                pct={it.discountPctPri}
-                applied={appliedValue(it, "pri")}
-                onChange={(p) => onDiscount(i, "pri", p)}
-              />
-            </div>
-
-            {/* 취득원가 줄 */}
+            {/* 취득원가 줄 (원본 편집) */}
             <DeltaLine
               label="취득"
               cur={it.cost.cur}
@@ -854,17 +856,105 @@ function TangibleTable({
               onPri={(v) => onTangible(i, "cost", "pri", v)}
             />
 
-            {/* 감가상각누계액 줄 (no_dep이면 없음) */}
-            {it.acc_dep && (
-              <DeltaLine
-                label="누계"
-                cur={it.acc_dep.cur}
-                pri={it.acc_dep.pri}
-                delta={it.acc_dep.delta}
-                onCur={(v) => onTangible(i, "acc_dep", "cur", v)}
-                onPri={(v) => onTangible(i, "acc_dep", "pri", v)}
+            {/* 취득원가 할인 (당기/전기) + 적용가 + 증감 */}
+            <div className="mt-1 bg-indigo-50 rounded px-1.5 py-1 space-y-1">
+              <div className="text-[10px] font-bold text-indigo-700">
+                취득원가 할인
+              </div>
+              <DiscountRow
+                label="당기"
+                pct={it.costDiscountPctCur}
+                applied={appliedCost(it, "cur")}
+                onChange={(p) => onDiscount(i, "cost", "cur", p)}
+                strong
               />
+              <DiscountRow
+                label="전기"
+                pct={it.costDiscountPctPri}
+                applied={appliedCost(it, "pri")}
+                onChange={(p) => onDiscount(i, "cost", "pri", p)}
+              />
+              <div className="flex items-center justify-end gap-1 pt-0.5 border-t border-indigo-100">
+                <span className="text-[10px] text-gray-500">증감</span>
+                <AmtSigned
+                  v={diff(appliedCost(it, "cur"), appliedCost(it, "pri"))}
+                  className="text-[14px] font-bold"
+                />
+              </div>
+            </div>
+
+            {/* 감가상각누계액 줄 + 할인 (누계 있는 항목만) */}
+            {it.acc_dep && (
+              <>
+                <DeltaLine
+                  label="누계"
+                  cur={it.acc_dep.cur}
+                  pri={it.acc_dep.pri}
+                  delta={it.acc_dep.delta}
+                  onCur={(v) => onTangible(i, "acc_dep", "cur", v)}
+                  onPri={(v) => onTangible(i, "acc_dep", "pri", v)}
+                />
+                <div className="mt-1 bg-rose-50 rounded px-1.5 py-1 space-y-1">
+                  <div className="text-[10px] font-bold text-rose-700">
+                    감가(누계) 할인
+                  </div>
+                  <DiscountRow
+                    label="당기"
+                    pct={it.depDiscountPctCur}
+                    applied={appliedDep(it, "cur")}
+                    onChange={(p) => onDiscount(i, "dep", "cur", p)}
+                    tone="rose"
+                    strong
+                  />
+                  <DiscountRow
+                    label="전기"
+                    pct={it.depDiscountPctPri}
+                    applied={appliedDep(it, "pri")}
+                    onChange={(p) => onDiscount(i, "dep", "pri", p)}
+                    tone="rose"
+                  />
+                  <div className="flex items-center justify-end gap-1 pt-0.5 border-t border-rose-100">
+                    <span className="text-[10px] text-gray-500">증감</span>
+                    <AmtSigned
+                      v={diff(appliedDep(it, "cur"), appliedDep(it, "pri"))}
+                      className="text-[14px] font-bold"
+                    />
+                  </div>
+                </div>
+              </>
             )}
+
+            {/* 순액(적용) = 할인 적용 취득 + 할인 적용 감가. 할인 없음·증감만 */}
+            <div className="mt-1 rounded px-1.5 py-1 bg-gray-100 border border-gray-200">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-gray-700">
+                  순액(적용)
+                </span>
+                <div className="flex items-baseline gap-2">
+                  <span className="flex items-baseline gap-0.5">
+                    <span className="text-[9px] text-gray-400">당</span>
+                    <Amt
+                      v={appliedValue(it, "cur")}
+                      className="text-[15px] font-bold text-gray-900"
+                    />
+                  </span>
+                  <span className="flex items-baseline gap-0.5">
+                    <span className="text-[9px] text-gray-400">전</span>
+                    <Amt
+                      v={appliedValue(it, "pri")}
+                      className="text-[13px] font-bold text-gray-600"
+                    />
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-1">
+                <span className="text-[10px] text-gray-500">증감</span>
+                <AmtSigned
+                  v={diff(appliedValue(it, "cur"), appliedValue(it, "pri"))}
+                  className="text-[14px] font-bold"
+                />
+              </div>
+            </div>
           </div>
         ))}
       </div>
