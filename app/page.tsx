@@ -9,7 +9,6 @@ import {
   diff,
   DISCOUNT_OPTIONS,
   DOC_LABEL,
-  toMillion,
   type CompanyView,
   type ItemStatus,
   type ParsedDoc,
@@ -22,18 +21,43 @@ const BADGE: Record<ItemStatus, string> = {
   review: "❓",
 };
 
-function fmt(n: number | null): string {
-  if (n == null) return "–";
-  return n.toLocaleString("en-US");
+// PATCH 2 표기: 최종값을 가장 가까운 백만으로 반올림해 백만 단위 정수로 표기(끝 0 생략).
+// 단, 100만원 미만은 반올림하지 않고 원 단위 원본값 그대로(작게 '원' 표시).
+function amt(v: number | null): { text: string; won: boolean } {
+  if (v == null) return { text: "–", won: false };
+  if (Math.abs(v) < 1_000_000) return { text: v.toLocaleString("en-US"), won: true };
+  return { text: Math.round(v / 1_000_000).toLocaleString("en-US"), won: false };
 }
 
-function signed(n: number | null): { text: string; cls: string } {
-  if (n == null) return { text: "–", cls: "text-gray-400" };
-  if (n === 0) return { text: "0", cls: "text-gray-400" };
-  const s = n.toLocaleString("en-US");
-  return n > 0
-    ? { text: "+" + s, cls: "text-green-600" }
-    : { text: s.replace("-", "−"), cls: "text-red-600" };
+// 읽기 전용 금액 표시 (백만원 단위, <100만은 원)
+function Amt({ v, className }: { v: number | null; className?: string }) {
+  const a = amt(v);
+  return (
+    <span className={className}>
+      <span className="tabular-nums">{a.text}</span>
+      {a.won && <span className="text-[9px] text-gray-400 ml-0.5">원</span>}
+    </span>
+  );
+}
+
+// 증감(부호+색상) 표시 — 백만원 단위, <100만은 원
+function AmtSigned({ v, className }: { v: number | null; className?: string }) {
+  if (v == null) return <span className={`text-gray-400 ${className ?? ""}`}>–</span>;
+  if (v === 0) return <span className={`text-gray-400 ${className ?? ""}`}>0</span>;
+  const big = Math.abs(v) >= 1_000_000;
+  const shown = big ? Math.round(v / 1_000_000) : v;
+  const won = !big;
+  const mag = Math.abs(shown).toLocaleString("en-US");
+  const cls = v > 0 ? "text-green-600" : "text-red-600";
+  return (
+    <span className={`${cls} ${className ?? ""}`}>
+      <span className="tabular-nums">
+        {v > 0 ? "+" : "−"}
+        {mag}
+      </span>
+      {won && <span className="text-[9px] opacity-60 ml-0.5">원</span>}
+    </span>
+  );
 }
 
 function readAsDataUrl(file: File): Promise<string> {
@@ -148,6 +172,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState(0);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [recaptureDismissed, setRecaptureDismissed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function addFiles(list: FileList) {
@@ -205,6 +230,7 @@ export default function Home() {
     );
     const docs = results.filter((d): d is ParsedDoc => d != null);
     setErrors(errs);
+    setRecaptureDismissed(false);
     if (docs.length) {
       const built = buildCompanies(docs);
       setCompanies(built);
@@ -299,7 +325,12 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-[420px] min-h-screen px-3 pb-12 pt-3">
-      <h1 className="text-base font-bold text-gray-800 mb-2">재무제표 파싱</h1>
+      <div className="flex items-baseline justify-between mb-2">
+        <h1 className="text-base font-bold text-gray-800">재무제표 파싱</h1>
+        <span className="text-[10px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1.5 py-0.5">
+          백만원 반올림 (백만 미만 그대로)
+        </span>
+      </div>
 
       {/* 다중 업로드 */}
       <div className="rounded-md border-2 border-dashed border-gray-300 bg-white p-2">
@@ -388,6 +419,8 @@ export default function Home() {
             updateTangible(activeTab, ii, field, sub, v)
           }
           onDiscount={(ii, pct) => updateDiscount(activeTab, ii, pct)}
+          dismissed={recaptureDismissed}
+          onDismiss={() => setRecaptureDismissed(true)}
         />
       )}
 
@@ -407,6 +440,8 @@ function CompanyBlock({
   onExtra,
   onTangible,
   onDiscount,
+  dismissed,
+  onDismiss,
 }: {
   company: CompanyView;
   single: boolean;
@@ -419,7 +454,20 @@ function CompanyBlock({
     v: number | null
   ) => void;
   onDiscount: (ii: number, pct: number | null) => void;
+  dismissed: boolean;
+  onDismiss: () => void;
 }) {
+  // 재무상태표 무결성은 '현재 셀 값' 기준으로 실시간 재검사 → 맞으면 자동으로 사라짐
+  const t = company.tangible?.totals;
+  const bsFail = !!(
+    t &&
+    ((t.printed.cur != null && !t.integrity.cur) ||
+      (t.printed.pri != null && !t.integrity.pri))
+  );
+  // 모델이 지적한 사유(제조/손익 등): 사용자가 셀 수정 후 '닫기'로 없앰
+  const showModelReasons = company.recapture.active && !dismissed;
+  const showBanner = showModelReasons || bsFail;
+
   return (
     <div className="mt-3">
       {single && (
@@ -443,6 +491,42 @@ function CompanyBlock({
           </span>
         )}
       </div>
+
+      {showBanner && (
+        <div className="mb-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2">
+          <div className="text-xs font-bold text-red-700">
+            ❓ 숫자가 정확히 안 맞아요. 종이를 평평하게 펴서 다시 찍어 올려주세요.
+          </div>
+          <ul className="mt-1 space-y-0.5">
+            {showModelReasons &&
+              company.recapture.reasons.map((r, i) => (
+                <li key={i} className="text-[11px] leading-snug text-red-800">
+                  · {r}
+                </li>
+              ))}
+            {bsFail && (
+              <li className="text-[11px] leading-snug text-red-800">
+                · 유형자산 숫자 줄이 한 칸씩 밀린 것 같아요. 합계가 맞지 않습니다.
+                종이가 구겨져 있으면 그럴 수 있어요. 평평하게 펴서 다시 찍거나, 아래
+                칸의 숫자를 직접 고쳐 주세요.
+              </li>
+            )}
+          </ul>
+          <div className="mt-1.5 flex items-center justify-between">
+            <span className="text-[10px] text-red-500">
+              값은 아래에 보이지만 정확하지 않을 수 있어요.
+            </span>
+            {showModelReasons && (
+              <button
+                onClick={onDismiss}
+                className="text-[11px] font-semibold text-red-700 bg-white border border-red-300 rounded px-2 py-0.5 active:bg-red-100"
+              >
+                숫자 확인함 · 안내 닫기
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {company.cost && (
         <Section title="비용 합산표">
@@ -552,9 +636,10 @@ function CostTable({
               </div>
               <div className="flex items-baseline gap-1 shrink-0">
                 <span className="text-[10px] text-gray-400">합산</span>
-                <span className="text-[15px] font-bold tabular-nums text-gray-900">
-                  {fmt(it.total)}
-                </span>
+                <Amt
+                  v={it.total}
+                  className="text-[15px] font-bold text-gray-900"
+                />
               </div>
             </div>
           </div>
@@ -596,11 +681,16 @@ function ExtraRow({
       } flex items-center justify-between gap-2`}
     >
       <span className="text-xs font-semibold text-gray-700">{name}</span>
-      <NumInput
-        value={value}
-        onChange={onChange}
-        className="w-32 text-[15px] font-bold text-gray-900 bg-white"
-      />
+      <div className="flex items-baseline gap-2 shrink-0">
+        {/* 원 단위 원본(편집·검산용, 작게) */}
+        <NumInput
+          value={value}
+          onChange={onChange}
+          className="w-28 text-[11px] text-gray-500 bg-white"
+        />
+        {/* 백만원 표기(복사용, 크게) */}
+        <Amt v={value} className="text-[15px] font-bold text-gray-900" />
+      </div>
     </div>
   );
 }
@@ -655,13 +745,13 @@ function TangibleTable({
             {/* 순액 (보조) */}
             <div className="mt-1 flex items-center gap-3 text-[11px] text-gray-500">
               <span className="text-[10px] text-gray-400">순액</span>
-              <span>당 {fmt(it.net.cur)}</span>
-              <span>전 {fmt(it.net.pri)}</span>
+              <span>당 <Amt v={it.net.cur} /></span>
+              <span>전 <Amt v={it.net.pri} /></span>
             </div>
 
-            {/* 할인율 토글 + 적용가(당기 순액 × 할인율%) */}
+            {/* 할인율 토글 + 적용가(당기/전기 = 순액 × 할인율%) */}
             <div className="mt-1 flex items-center justify-between gap-2 bg-indigo-50 rounded px-1.5 py-1">
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 shrink-0">
                 <span className="text-[10px] text-gray-500">할인율</span>
                 <select
                   value={it.discountPct ?? ""}
@@ -680,10 +770,21 @@ function TangibleTable({
                   ))}
                 </select>
               </div>
-              <div className="flex items-baseline gap-1 shrink-0">
+              <div className="flex items-baseline gap-2 shrink-0">
                 <span className="text-[10px] text-gray-500">적용가</span>
-                <span className="text-[15px] font-bold tabular-nums text-indigo-700">
-                  {fmt(appliedValue(it))}
+                <span className="flex items-baseline gap-0.5">
+                  <span className="text-[9px] text-indigo-400">당</span>
+                  <Amt
+                    v={appliedValue(it, "cur")}
+                    className="text-[15px] font-bold text-indigo-700"
+                  />
+                </span>
+                <span className="flex items-baseline gap-0.5">
+                  <span className="text-[9px] text-indigo-400">전</span>
+                  <Amt
+                    v={appliedValue(it, "pri")}
+                    className="text-[13px] font-bold text-indigo-500"
+                  />
                 </span>
               </div>
             </div>
@@ -726,21 +827,17 @@ function TangibleTable({
         <div className="mt-1 grid grid-cols-2 gap-2 text-[11px]">
           <div>
             <span className="text-gray-400">당기 </span>
-            <span className="font-bold tabular-nums text-gray-900">
-              {fmt(tangible.totals.net.cur)}
-            </span>
+            <Amt v={tangible.totals.net.cur} className="font-bold text-gray-900" />
             <div className="text-[10px] text-gray-400">
-              인쇄 {fmt(tangible.totals.printed.cur)}{" "}
+              인쇄 <Amt v={tangible.totals.printed.cur} />{" "}
               {tangible.totals.integrity.cur ? "✓" : "✗"}
             </div>
           </div>
           <div>
             <span className="text-gray-400">전기 </span>
-            <span className="font-bold tabular-nums text-gray-900">
-              {fmt(tangible.totals.net.pri)}
-            </span>
+            <Amt v={tangible.totals.net.pri} className="font-bold text-gray-900" />
             <div className="text-[10px] text-gray-400">
-              인쇄 {fmt(tangible.totals.printed.pri)}{" "}
+              인쇄 <Amt v={tangible.totals.printed.pri} />{" "}
               {tangible.totals.integrity.pri ? "✓" : "✗"}
             </div>
           </div>
@@ -752,24 +849,37 @@ function TangibleTable({
         )}
       </div>
 
-      {/* 그룹 소계 (당기 순액) — 백만원 단위 정수 + 원 병기 */}
+      {/* 그룹 소계 (당기/전기, 할인 적용가 기준) — 할인율 바꾸면 즉시 반영 */}
       <SubtotalRow
-        label="기계장치 · 시설장치 · 금형 순액"
-        won={tangible.totals.subtotalMachine}
+        label="기계장치 · 시설장치 · 금형 (적용가)"
+        cur={tangible.totals.subtotalMachine.cur}
+        pri={tangible.totals.subtotalMachine.pri}
       />
       <SubtotalRow
-        label="공구와기구 · 비품 순액"
-        won={tangible.totals.subtotalTools}
+        label="공구와기구 · 비품 (적용가)"
+        cur={tangible.totals.subtotalTools.cur}
+        pri={tangible.totals.subtotalTools.pri}
       />
 
-      {/* 할인 적용가 합계 (당기) — 주인공 */}
-      <div className="mt-2 rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-2 flex items-center justify-between">
-        <span className="text-xs font-bold text-indigo-900">
-          할인 적용가 합계 <span className="text-[10px] text-indigo-500">(당기)</span>
-        </span>
-        <span className="text-[17px] font-bold tabular-nums text-indigo-700">
-          {fmt(tangible.totals.applied)}
-        </span>
+      {/* 할인 적용가 합계 (당기/전기) — 주인공 */}
+      <div className="mt-2 rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-2">
+        <div className="text-xs font-bold text-indigo-900">할인 적용가 합계</div>
+        <div className="mt-1 flex items-center justify-between gap-3">
+          <div className="flex items-baseline gap-1">
+            <span className="text-[10px] text-indigo-500">당기</span>
+            <Amt
+              v={tangible.totals.applied.cur}
+              className="text-[18px] font-bold text-indigo-700"
+            />
+          </div>
+          <div className="flex items-baseline gap-1">
+            <span className="text-[10px] text-indigo-500">전기</span>
+            <Amt
+              v={tangible.totals.applied.pri}
+              className="text-[16px] font-bold text-indigo-500"
+            />
+          </div>
+        </div>
       </div>
 
       {notes.length > 0 && <NotesArea notes={notes} />}
@@ -777,19 +887,28 @@ function TangibleTable({
   );
 }
 
-// 그룹 순액 소계 한 줄: 백만원 단위 정수 강조 + 원 값 병기
-function SubtotalRow({ label, won }: { label: string; won: number | null }) {
+// 그룹 순액 소계 한 줄: 당기/전기 (백만원 단위)
+function SubtotalRow({
+  label,
+  cur,
+  pri,
+}: {
+  label: string;
+  cur: number | null;
+  pri: number | null;
+}) {
   return (
-    <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 flex items-center justify-between gap-2">
-      <div className="min-w-0">
-        <div className="text-xs font-bold text-emerald-900">{label}</div>
-        <div className="text-[10px] text-emerald-600">{fmt(won)} 원</div>
-      </div>
-      <div className="flex items-baseline gap-1 shrink-0">
-        <span className="text-[18px] font-bold tabular-nums text-emerald-700">
-          {fmt(toMillion(won))}
-        </span>
-        <span className="text-[10px] text-emerald-500">백만원</span>
+    <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2">
+      <div className="text-xs font-bold text-emerald-900">{label}</div>
+      <div className="mt-1 flex items-center justify-between gap-3">
+        <div className="flex items-baseline gap-1">
+          <span className="text-[10px] text-emerald-500">당기</span>
+          <Amt v={cur} className="text-[17px] font-bold text-emerald-700" />
+        </div>
+        <div className="flex items-baseline gap-1">
+          <span className="text-[10px] text-emerald-500">전기</span>
+          <Amt v={pri} className="text-[15px] font-bold text-emerald-600" />
+        </div>
       </div>
     </div>
   );
@@ -811,7 +930,6 @@ function DeltaLine({
   onCur: (v: number | null) => void;
   onPri: (v: number | null) => void;
 }) {
-  const d = signed(delta);
   return (
     <div className="mt-1 flex items-center justify-between gap-1">
       <div className="flex items-center gap-1.5 min-w-0">
@@ -829,9 +947,7 @@ function DeltaLine({
       </div>
       <div className="flex items-baseline gap-1 shrink-0">
         <span className="text-[10px] text-gray-400">증감</span>
-        <span className={`text-[14px] font-bold tabular-nums ${d.cls}`}>
-          {d.text}
-        </span>
+        <AmtSigned v={delta} className="text-[14px] font-bold" />
       </div>
     </div>
   );

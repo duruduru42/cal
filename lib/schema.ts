@@ -47,6 +47,9 @@ export interface ParsedDoc {
   // 재무상태표일 때
   tangible_assets: TangibleRaw[] | null;
   printed_total: { cur: number | null; pri: number | null } | null;
+  // PATCH 3: 소계 검산(모델 자가검증) 결과 — 행 밀림/드리프트 감지
+  recapture: boolean; // 소계가 안 맞아 재촬영 권장
+  recaptureReasons: string[]; // 사람이 읽을 사유
 }
 
 // 표준 비용 품목 16개 (출력 순서 고정)
@@ -145,6 +148,10 @@ function toUnit(v: any): Unit {
 // ───────────────────────── 응답 정규화 ─────────────────────────
 
 export function normalizeDoc(raw: any): ParsedDoc {
+  // PATCH 1: 추출값은 항상 '원 단위 원본'으로 보관(반올림 금지).
+  // 반올림은 표기 단계에서 최종값에만 1회 적용한다(클라이언트 표기 포매터).
+  const M = (v: any): number | null => toNum(v);
+
   const doc_type: DocType =
     raw?.doc_type === "income_statement" ||
     raw?.doc_type === "manufacturing_cost" ||
@@ -173,8 +180,8 @@ export function normalizeDoc(raw: any): ParsedDoc {
     }
     items = STANDARD_ITEMS.map((name) => {
       const src = byName.get(name);
-      const pl = toNum(src?.pl);
-      const cogm = toNum(src?.cogm);
+      const pl = M(src?.pl);
+      const cogm = M(src?.cogm);
       return {
         name,
         pl,
@@ -185,8 +192,8 @@ export function normalizeDoc(raw: any): ParsedDoc {
       };
     });
     extras = {
-      손익계산서_판관비: toNum(raw?.extras?.["손익계산서_판관비"]),
-      영업이익: toNum(raw?.extras?.["영업이익"]),
+      손익계산서_판관비: M(raw?.extras?.["손익계산서_판관비"]),
+      영업이익: M(raw?.extras?.["영업이익"]),
     };
   }
 
@@ -200,20 +207,25 @@ export function normalizeDoc(raw: any): ParsedDoc {
         const no_dep = !!t.no_dep || t.acc_dep == null;
         return {
           name: t.name.trim(),
-          cost: { cur: toNum(t?.cost?.cur), pri: toNum(t?.cost?.pri) },
+          cost: { cur: M(t?.cost?.cur), pri: M(t?.cost?.pri) },
           acc_dep: no_dep
             ? null
-            : { cur: toNum(t?.acc_dep?.cur), pri: toNum(t?.acc_dep?.pri) },
+            : { cur: M(t?.acc_dep?.cur), pri: M(t?.acc_dep?.pri) },
           no_dep,
           status: toStatus(t.status),
           note: typeof t.note === "string" ? t.note : "",
         };
       });
     printed_total = {
-      cur: toNum(raw?.printed_total?.cur),
-      pri: toNum(raw?.printed_total?.pri),
+      cur: M(raw?.printed_total?.cur),
+      pri: M(raw?.printed_total?.pri),
     };
   }
+
+  const recaptureReasons = Array.isArray(raw?.recapture_reasons)
+    ? raw.recapture_reasons.filter((s: any) => typeof s === "string")
+    : [];
+  const recapture = !!raw?.recapture || recaptureReasons.length > 0;
 
   return {
     doc_type,
@@ -225,6 +237,8 @@ export function normalizeDoc(raw: any): ParsedDoc {
     extras,
     tangible_assets,
     printed_total,
+    recapture,
+    recaptureReasons,
   };
 }
 
@@ -254,16 +268,10 @@ export interface TangibleTotals {
   net: { cur: number | null; pri: number | null };
   printed: { cur: number | null; pri: number | null };
   integrity: { cur: boolean; pri: boolean };
-  applied: number | null; // 적용가 합계(당기) = Σ 순액당기 × 할인율%
-  // 항목 그룹별 순액(당기) 소계 — 원 단위. 화면에서 백만원 단위로 반올림 표시.
-  subtotalMachine: number | null; // 기계장치 + 시설장치 + 금형
-  subtotalTools: number | null; // 공구와기구 + 비품
-}
-
-// 원 → 백만원 단위 정수(반올림). 100만원 미만은 반올림.
-export function toMillion(v: number | null): number | null {
-  if (v == null) return null;
-  return Math.round(v / 1_000_000);
+  applied: { cur: number | null; pri: number | null }; // 적용가 합계(당/전) = Σ 적용가
+  // 항목 그룹별 '적용가' 소계 (당기/전기) — 할인율 반영(없음=순액)
+  subtotalMachine: { cur: number | null; pri: number | null }; // 기계+시설+금형
+  subtotalTools: { cur: number | null; pri: number | null }; // 공구와기구+비품
 }
 
 // 선택 가능한 할인율(%) — 없음(null) + 10~90
@@ -280,11 +288,16 @@ export const DISCOUNT_OPTIONS: (number | null)[] = [
   90,
 ];
 
-// 적용가(당기) = 순액당기 × (할인율%/100). 없음(null)이면 순액 그대로(100% 인정).
-export function appliedValue(it: TangibleItem): number | null {
-  if (it.net.cur == null) return null;
+// 적용가 = 순액 × (할인율%/100). 없음(null)이면 순액 그대로(100% 인정).
+// k="cur"(당기, 기본) | "pri"(전기).
+export function appliedValue(
+  it: TangibleItem,
+  k: "cur" | "pri" = "cur"
+): number | null {
+  const v = it.net[k];
+  if (v == null) return null;
   const pct = it.discountPct ?? 100;
-  return Math.round(it.net.cur * (pct / 100));
+  return Math.round(v * (pct / 100));
 }
 
 export interface TangibleView {
@@ -299,6 +312,8 @@ export interface CompanyView {
   cost: CostView | null;
   tangible: TangibleView | null;
   fiscal: Fiscal;
+  // PATCH 3: 소계 검산 실패 시 재촬영 배너
+  recapture: { active: boolean; reasons: string[] };
 }
 
 // 유형자산 한 줄 계산 (순액 + 줄별 증감)
@@ -364,34 +379,46 @@ export function computeTangibleTotals(
   };
   const net = { cur: sum("cur"), pri: sum("pri") };
 
-  // 적용가 합계(당기): 각 항목의 할인 적용가를 더함(없음=100% 인정)
-  let applied: number | null = null;
-  for (const it of items) {
-    const v = appliedValue(it);
-    if (v != null) applied = (applied ?? 0) + v;
-  }
-
-  // 항목 그룹별 순액(당기) 소계 — 이름으로 매칭
-  const sumNetCur = (pred: (name: string) => boolean): number | null => {
+  // 그룹/전체 '적용가' 소계 — 할인율 반영(없음=순액). 당기/전기 각각, 이름으로 매칭.
+  const sumApplied = (
+    pred: (name: string) => boolean,
+    k: "cur" | "pri"
+  ): number | null => {
     let acc = 0;
     let any = false;
     for (const it of items) {
-      if (pred(it.name) && it.net.cur != null) {
-        acc += it.net.cur;
+      if (!pred(it.name)) continue;
+      const v = appliedValue(it, k);
+      if (v != null) {
+        acc += v;
         any = true;
       }
     }
     return any ? acc : null;
   };
-  const subtotalMachine = sumNetCur((n) => /기계|시설|금형/.test(n));
-  const subtotalTools = sumNetCur((n) => /공구|비품/.test(n));
+  const all = () => true;
+  const isMachine = (n: string) => /기계|시설|금형/.test(n);
+  const isTools = (n: string) => /공구|비품/.test(n);
+  const applied = { cur: sumApplied(all, "cur"), pri: sumApplied(all, "pri") };
+  const subtotalMachine = {
+    cur: sumApplied(isMachine, "cur"),
+    pri: sumApplied(isMachine, "pri"),
+  };
+  const subtotalTools = {
+    cur: sumApplied(isTools, "cur"),
+    pri: sumApplied(isTools, "pri"),
+  };
+
+  // 원 단위 원본으로 정확 비교(드리프트/행밀림 감지). 한 칸만 밀려도 크게 어긋남.
+  const ok = (a: number | null, b: number | null) =>
+    a != null && b != null && a === b;
 
   return {
     net,
     printed,
     integrity: {
-      cur: printed.cur != null && net.cur === printed.cur,
-      pri: printed.pri != null && net.pri === printed.pri,
+      cur: ok(net.cur, printed.cur),
+      pri: ok(net.pri, printed.pri),
     },
     applied,
     subtotalMachine,
@@ -508,6 +535,15 @@ export function buildCompanies(docs: ParsedDoc[]): CompanyView[] {
       prior: null,
     };
 
+  // PATCH 3: 재촬영 사유(모델 자가검산). 재무상태표 무결성은 컴포넌트에서 '실시간'으로
+  // 다시 검사하므로(셀 수정 시 자동 갱신) 여기 정적 사유에는 넣지 않는다.
+  const reasons: string[] = [];
+  for (const d of docs) {
+    for (const r of d.recaptureReasons) {
+      if (!reasons.includes(r)) reasons.push(r);
+    }
+  }
+
   return [
     {
       company_key: "all",
@@ -516,6 +552,7 @@ export function buildCompanies(docs: ParsedDoc[]): CompanyView[] {
       cost,
       tangible,
       fiscal,
+      recapture: { active: reasons.length > 0, reasons },
     },
   ];
 }
