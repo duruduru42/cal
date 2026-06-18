@@ -261,72 +261,30 @@ export interface TangibleItem {
   no_dep: boolean;
   status: ItemStatus;
   note: string;
-  // 할인율(%) 10~90, null=없음(100% 인정) — 당기/전기 각각 별도 적용
-  // 취득원가(cost) 할인
-  costDiscountPctCur: number | null;
-  costDiscountPctPri: number | null;
-  // 감가상각누계액(acc_dep) 할인
-  depDiscountPctCur: number | null;
-  depDiscountPctPri: number | null;
 }
 
 export interface TangibleTotals {
-  net: { cur: number | null; pri: number | null };
+  net: { cur: number | null; pri: number | null }; // 순액 합계(당/전) — 할인 전
   printed: { cur: number | null; pri: number | null };
   integrity: { cur: boolean; pri: boolean };
-  applied: { cur: number | null; pri: number | null }; // 적용가 합계(당/전) = Σ 적용가
-  // 항목 그룹별 '적용가' 소계 (당기/전기) — 할인율 반영(없음=순액)
+  // 항목 그룹별 순액 소계 (당기/전기) — 할인 전. 화면에서 전체 할인율을 곱해 표시.
   subtotalMachine: { cur: number | null; pri: number | null }; // 기계+시설+금형
   subtotalTools: { cur: number | null; pri: number | null }; // 공구와기구+비품
 }
 
-// 선택 가능한 할인율(%) — 없음(null) + 10~90
-export const DISCOUNT_OPTIONS: (number | null)[] = [
-  null,
-  10,
-  20,
-  30,
-  40,
-  50,
-  60,
-  70,
-  80,
-  90,
-];
+// 전체 일괄 할인율(%) 선택지
+export const DISCOUNT_OPTIONS: number[] = [10, 20, 30, 40, 50, 60, 70, 80, 90];
 
-// 취득원가 적용가 = 취득원가 × (취득할인율%/100).
-export function appliedCost(
-  it: TangibleItem,
-  k: "cur" | "pri" = "cur"
+// 전체 할인율을 곱한 적용값. on=false면 원래 값 그대로.
+// 같은 율을 전체에 곱하므로 Σ(net×율)=(Σnet)×율 — 합계도 이 함수로 일괄 적용.
+export function applyDiscount(
+  v: number | null,
+  on: boolean,
+  pct: number
 ): number | null {
-  const v = it.cost[k];
   if (v == null) return null;
-  const pct = (k === "cur" ? it.costDiscountPctCur : it.costDiscountPctPri) ?? 100;
+  if (!on) return v;
   return Math.round(v * (pct / 100));
-}
-
-// 감가상각누계액 적용가 = 누계액 × (감가할인율%/100). 누계 없으면 null.
-export function appliedDep(
-  it: TangibleItem,
-  k: "cur" | "pri" = "cur"
-): number | null {
-  if (!it.acc_dep) return null;
-  const v = it.acc_dep[k];
-  if (v == null) return null;
-  const pct = (k === "cur" ? it.depDiscountPctCur : it.depDiscountPctPri) ?? 100;
-  return Math.round(v * (pct / 100));
-}
-
-// 순액 적용가 = 할인 적용된 취득원가 + 할인 적용된 감가상각누계액.
-// (순액 자체엔 할인을 걸지 않음. no_dep이면 = 취득 적용가)
-export function appliedValue(
-  it: TangibleItem,
-  k: "cur" | "pri" = "cur"
-): number | null {
-  const c = appliedCost(it, k);
-  const d = appliedDep(it, k);
-  if (c == null && d == null) return null;
-  return (c ?? 0) + (d ?? 0);
 }
 
 export interface TangibleView {
@@ -361,10 +319,6 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
       no_dep: true,
       status: r.status,
       note: r.note,
-      costDiscountPctCur: null,
-      costDiscountPctPri: null,
-      depDiscountPctCur: null,
-      depDiscountPctPri: null,
     };
   }
   const acc_dep = {
@@ -383,10 +337,6 @@ export function computeTangibleItem(r: TangibleRaw): TangibleItem {
     no_dep: false,
     status: r.status,
     note: r.note,
-    costDiscountPctCur: null,
-    costDiscountPctPri: null,
-    depDiscountPctCur: null,
-    depDiscountPctPri: null,
   };
 }
 
@@ -414,8 +364,8 @@ export function computeTangibleTotals(
   };
   const net = { cur: sum("cur"), pri: sum("pri") };
 
-  // 그룹/전체 '적용가' 소계 — 할인율 반영(없음=순액). 당기/전기 각각, 이름으로 매칭.
-  const sumApplied = (
+  // 그룹별 순액 소계 (당기/전기, 할인 전) — 이름으로 매칭. 화면에서 전체 할인율 곱함.
+  const sumNet = (
     pred: (name: string) => boolean,
     k: "cur" | "pri"
   ): number | null => {
@@ -423,7 +373,7 @@ export function computeTangibleTotals(
     let any = false;
     for (const it of items) {
       if (!pred(it.name)) continue;
-      const v = appliedValue(it, k);
+      const v = it.net[k];
       if (v != null) {
         acc += v;
         any = true;
@@ -431,17 +381,15 @@ export function computeTangibleTotals(
     }
     return any ? acc : null;
   };
-  const all = () => true;
   const isMachine = (n: string) => /기계|시설|금형/.test(n);
   const isTools = (n: string) => /공구|비품/.test(n);
-  const applied = { cur: sumApplied(all, "cur"), pri: sumApplied(all, "pri") };
   const subtotalMachine = {
-    cur: sumApplied(isMachine, "cur"),
-    pri: sumApplied(isMachine, "pri"),
+    cur: sumNet(isMachine, "cur"),
+    pri: sumNet(isMachine, "pri"),
   };
   const subtotalTools = {
-    cur: sumApplied(isTools, "cur"),
-    pri: sumApplied(isTools, "pri"),
+    cur: sumNet(isTools, "cur"),
+    pri: sumNet(isTools, "pri"),
   };
 
   // 원 단위 원본으로 정확 비교(드리프트/행밀림 감지). 한 칸만 밀려도 크게 어긋남.
@@ -455,7 +403,6 @@ export function computeTangibleTotals(
       cur: ok(net.cur, printed.cur),
       pri: ok(net.pri, printed.pri),
     },
-    applied,
     subtotalMachine,
     subtotalTools,
   };
